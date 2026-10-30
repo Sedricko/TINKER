@@ -1,0 +1,5 @@
+.gradle/
+build/
+local.properties
+# o CI compila o daemon e o alvo de teste para cá
+app/src/main/jniLibs/

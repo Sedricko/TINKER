@@ -1,0 +1,58 @@
+name: build
+
+on:
+  push:
+    # mudança só no agente do PC não gera APK novo
+    paths-ignore: ['tools/pc/**']
+  pull_request:
+  workflow_dispatch:
+
+# um push novo cancela o build anterior: senão um build velho que termina depois troca o APK da release
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25  # um runner travado gastava horas da cota
+    permissions:
+      contents: write  # publicar o APK em Releases
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Testa o daemon
+        run: sudo tests/daemon_test.sh
+
+      # arm64 para o celular; x86_64 para o emulador do PC, onde rodam os testes automáticos
+      - name: Compila o daemon e o alvo de teste
+        run: |
+          bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for abi in arm64-v8a:aarch64 x86_64:x86_64; do
+            dir=app/src/main/jniLibs/${abi%%:*}; cc="$bin/${abi##*:}-linux-android26-clang"
+            mkdir -p "$dir"
+            "$cc" -O2 -Wall -Werror -pthread -o "$dir/libtinkerd.so" daemon/tinkerd.c -lm
+            "$cc" -O2 -o "$dir/libtinkeralvo.so" tests/alvo.c
+          done
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: gradle
+
+      - name: Testes e APK
+        run: ./gradlew --no-daemon testDebugUnitTest assembleRelease
+
+      - name: Publica em Releases
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
+          cp app/build/outputs/apk/release/app-release.apk "Tinker-$v.apk"
+          if gh release view "v$v" >/dev/null 2>&1; then
+            gh release upload "v$v" "Tinker-$v.apk" --clobber
+          else
+            gh release create "v$v" "Tinker-$v.apk" --target "$GITHUB_SHA" --title "Tinker $v" --notes "Tinker $v (arm64 e x86_64)."
+          fi
